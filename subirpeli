@@ -88,7 +88,7 @@ def registrar_en_catalogo(col_pelicula, col_carpeta):
         print(f"   {col_pelicula}   |   {col_carpeta}")
 
 def hay_rclone_activo():
-    res = subprocess.run(["pgrep", "-x", "rclone"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    res = subprocess.run(["pgrep", "-f", "rclone (copy|move)"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return res.returncode == 0
 
 def main():
