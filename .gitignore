@@ -1,0 +1,17 @@
+# Archivos de video y medios pesados
+*.mkv
+*.mp4
+*.avi
+*.ts
+
+# Archivos temporales o de descarga
+*.part
+*.crdownload
+*.tmp
+
+# Logs y registros de ejecución
+*.log
+
+# Archivos del sistema
+.DS_Store
+Thumbs.db

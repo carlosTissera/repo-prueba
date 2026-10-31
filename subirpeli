@@ -1,0 +1,257 @@
+#!/usr/bin/env python3
+import os
+import re
+import sys
+import time
+import json
+import fcntl
+import subprocess
+import urllib.request
+
+# Pegá acá entre las comillas la URL /exec de tu Google Apps Script:
+WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbwHYU9A7PUWwFPUmjeJhCP_1Ro8q0_FnwXB9XYEoRY_rbb3534hzP6epAGY3iDrI6CZ/exec"
+
+CATEGORIAS = [
+    "Acción y Thriller",
+    "Animación",
+    "ARGENTINA",
+    "Ciencia Ficción",
+    "Clásicos",
+    "Comedia",
+    "Directores",
+    "Documentales",
+    "Drama",
+    "Sagas",
+    "Terror y Suspenso"
+]
+
+def limpiar_titulo_sugerido(nombre):
+    nombre = os.path.splitext(nombre)[0]
+    nombre = nombre.replace(".", " ").replace("_", " ")
+    match = re.match(r"^(.*?)\b((?:19|20)\d{2})\b", nombre)
+    if match:
+        titulo = match.group(1).strip(" -([])")
+        anio = match.group(2)
+        return f"{titulo} ({anio})"
+    return nombre.strip()
+
+def convertir_srt_a_utf8(srt_path):
+    with open(srt_path, "rb") as f:
+        raw = f.read()
+    if raw.startswith(b"\xef\xbb\xbf"):
+        raw = raw[3:]
+    try:
+        texto = raw.decode("utf-8")
+        print("✅ El archivo .srt ya está en UTF-8 nativo.")
+    except UnicodeDecodeError:
+        texto = raw.decode("cp1252", errors="replace")
+        with open(srt_path, "w", encoding="utf-8") as f:
+            f.write(texto)
+        print("🔧 Subtítulo detectado en Windows-1252 (ANSI) ➔ Convertido automáticamente a UTF-8 limpio.")
+
+def obtener_info_mkv(video_path):
+    res = subprocess.run(["mkvmerge", "-J", video_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if res.returncode != 0:
+        return [], None
+    try:
+        data = json.loads(res.stdout)
+        tracks = data.get("tracks", [])
+        dur_ns = data.get("container", {}).get("properties", {}).get("duration")
+        minutos = round(dur_ns / 60_000_000_000) if dur_ns else None
+        return tracks, minutos
+    except Exception:
+        return [], None
+
+def registrar_en_catalogo(col_pelicula, col_carpeta):
+    if not WEBHOOK_URL or "PEGAR_AQUI" in WEBHOOK_URL:
+        print("⚠️ No configuraste WEBHOOK_URL en /usr/local/bin/subirpeli. Copiá manualmente:")
+        print(f"   {col_pelicula}   |   {col_carpeta}")
+        return
+
+    print("📝 Agregando película automáticamente a la tabla del Google Doc...")
+    payload = json.dumps({"pelicula": col_pelicula, "carpeta": col_carpeta}).encode("utf-8")
+    req = urllib.request.Request(
+        WEBHOOK_URL,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            respuesta = json.loads(resp.read().decode("utf-8"))
+            if respuesta.get("ok"):
+                print(f"✅ ¡Catálogo y Ruleta actualizados solos! ({col_pelicula} ➔ {col_carpeta})")
+            else:
+                print(f"⚠️ El documento devolvió un aviso: {respuesta.get('error')}")
+    except Exception as e:
+        print(f"⚠️ No se pudo contactar al Google Doc automáticamente ({e}). Fila para pegar:")
+        print(f"   {col_pelicula}   |   {col_carpeta}")
+
+def hay_rclone_activo():
+    res = subprocess.run(["pgrep", "-x", "rclone"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return res.returncode == 0
+
+def main():
+    archivos = os.listdir(".")
+    videos = [f for f in archivos if f.lower().endswith((".mkv", ".mp4")) and not f.startswith("temp_")]
+    srts = [f for f in archivos if f.lower().endswith(".srt")]
+
+    if not videos:
+        print("❌ No se encontró ningún archivo .mkv o .mp4 en esta carpeta.")
+        sys.exit(1)
+
+    video = videos[0]
+    if len(videos) > 1:
+        print("\n🎬 Videos encontrados:")
+        for i, v in enumerate(videos, 1):
+            print(f"  {i}. {v}")
+        idx = int(input("Elegí el número de video: ").strip() or "1") - 1
+        video = videos[idx]
+
+    print(f"\n🎬 Video seleccionado: {video}")
+    mkv_final = os.path.splitext(video)[0] + ".mkv"
+    temp_mkv = "temp_mux_" + mkv_final
+
+    # CASO A: Hay un archivo .srt externo en la carpeta
+    if srts:
+        srt = srts[0]
+        if len(srts) > 1:
+            print("\n💬 Subtítulos .srt encontrados:")
+            for i, s in enumerate(srts, 1):
+                print(f"  {i}. {s}")
+            idx = int(input("Elegí el número de .srt: ").strip() or "1") - 1
+            srt = srts[idx]
+
+        print(f"💬 Procesando subtítulo externo: {srt}")
+        convertir_srt_a_utf8(srt)
+
+        delay = input("⏱️  ¿Aplicar delay en ms al subtítulo? (Enter para 0, ej: -2000 o 500): ").strip() or "0"
+        print("⚙️  Uniendo video y subtítulo en MKV (quitando otros subtítulos viejos)...")
+
+        cmd = [
+            "mkvmerge", "-o", temp_mkv,
+            "-S", video,
+            "--language", "0:spa",
+            "--track-name", "0:Español",
+            "--default-track-flag", "0:yes",
+            "--sync", f"0:{delay}",
+            srt
+        ]
+        res = subprocess.run(cmd)
+        if res.returncode in [0, 1]:
+            os.remove(video)
+            os.rename(temp_mkv, mkv_final)
+            os.remove(srt)
+            print(f"✅ ¡Multiplexado listo y .srt externo limpiado! Guardado como: {mkv_final}")
+        else:
+            if os.path.exists(temp_mkv):
+                os.remove(temp_mkv)
+            print("❌ Error al multiplexar con mkvmerge.")
+            sys.exit(1)
+
+    # CASO B: No hay .srt externo (ej. WEB-DL con subtítulos internos)
+    else:
+        tracks, _ = obtener_info_mkv(video)
+        sub_tracks = [t for t in tracks if t.get("type") == "subtitles"]
+        print(f"\nℹ️  No hay .srt externo. El video tiene {len(sub_tracks)} pista(s) de subtítulos interna(s).")
+
+        if len(sub_tracks) > 1:
+            print("\nPistas de subtítulos detectadas adentro del video:")
+            esp_ids = []
+            for t in sub_tracks:
+                tid = t["id"]
+                props = t.get("properties", {})
+                lang = props.get("language_ietf") or props.get("language", "und")
+                name = props.get("track_name", "(sin nombre)")
+                print(f"  • ID {tid}: [{lang}] {name}")
+                if "es" in lang.lower() or "spa" in lang.lower() or "esp" in name.lower() or "spa" in name.lower():
+                    esp_ids.append(str(tid))
+
+            limpiar = input("\n🧹 ¿Querés borrar los demás idiomas y dejar solo una pista en Español? (s/N): ").strip().lower()
+            if limpiar == "s":
+                sugerido = esp_ids[0] if esp_ids else ""
+                id_elegido = input(f"Ingresá el ID del subtítulo en español a conservar [{sugerido}]: ").strip() or sugerido
+                if id_elegido:
+                    cmd = [
+                        "mkvmerge", "-o", temp_mkv,
+                        "-s", id_elegido,
+                        "--language", f"{id_elegido}:spa",
+                        "--track-name", f"{id_elegido}:Español",
+                        "--default-track-flag", f"{id_elegido}:yes",
+                        video
+                    ]
+                    res = subprocess.run(cmd)
+                    if res.returncode in [0, 1]:
+                        os.remove(video)
+                        os.rename(temp_mkv, mkv_final)
+                        print("✅ ¡Pistas limpiadas! Quedó solo el subtítulo en español.")
+
+    # Detectar duración automáticamente del archivo final
+    _, minutos = obtener_info_mkv(mkv_final)
+    if minutos:
+        print(f"⏱️  Duración detectada automáticamente: {minutos} min")
+    else:
+        min_manual = input("⏱️  No se pudo leer la duración. Ingresá los minutos (Enter para 120): ").strip()
+        minutos = int(min_manual) if min_manual.isdigit() else 120
+
+    # SELECCIÓN DE CARPETA DE DESTINO EN GOOGLE DRIVE
+    print("\n📂 Elegí a cuál de las 11 carpetas de PELICULAS querés subirla:")
+    for i, cat in enumerate(CATEGORIAS, 1):
+        print(f"  {i:2d}. {cat}")
+
+    op = int(input("\nNúmero de categoría (1-11): ").strip())
+    categoria_elegida = CATEGORIAS[op - 1]
+    ruta_remota_base = f"drive:PELICULAS/{categoria_elegida}"
+
+    if categoria_elegida in ["Directores", "Sagas", "ARGENTINA"]:
+        print(f"\n🔍 Subcarpetas actuales dentro de '{categoria_elegida}':")
+        subprocess.run(["rclone", "lsf", "--dirs-only", ruta_remota_base])
+        sub = input(f"Escribí el nombre de la subcarpeta (o Enter si va suelta en {categoria_elegida}): ").strip().rstrip("/")
+        if sub:
+            ruta_remota_base = f"{ruta_remota_base}/{sub}"
+
+    sugerencia = limpiar_titulo_sugerido(mkv_final)
+    nombre_carpeta_peli = input(f"\n📁 Nombre para la carpeta en Drive [{sugerencia}]: ").strip() or sugerencia
+
+    # Si a la carpeta no le pusiste el año, conserva el año sugerido para el texto del catálogo
+    titulo_catalogo_ing = sugerencia if ("(" in sugerencia and "(" not in nombre_carpeta_peli) else nombre_carpeta_peli
+    base_sin_anio = re.sub(r"\s*\(\d{4}\)\s*", "", titulo_catalogo_ing).strip()
+    titulo_esp = input(f"🇦🇷 Título en español para el catálogo [{base_sin_anio}]: ").strip() or base_sin_anio
+
+    destino_final = f"{ruta_remota_base}/{nombre_carpeta_peli}"
+    sub_ruta_catalogo = ruta_remota_base.replace("drive:PELICULAS/", "").replace("/", " › ")
+    col_pelicula_doc = f"{titulo_catalogo_ing} / {titulo_esp} [{minutos}m]"
+
+    # SISTEMA DE COLA AUTOMÁTICA
+    lock_file = open("/tmp/subirpeli_queue.lock", "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print(f"\n⏳ Hay otra película en cola o subiéndose. '{nombre_carpeta_peli}' quedó en espera y arrancará sola...")
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+
+    if hay_rclone_activo():
+        print(f"\n⏳ Esperando a que termine la subida actual en curso para iniciar '{nombre_carpeta_peli}'...")
+        while hay_rclone_activo():
+            time.sleep(3)
+
+    print(f"\n🚀 Turno asignado. Subiendo '{mkv_final}' a ➔ {destino_final} ...\n")
+    res_up = subprocess.run([
+        "rclone", "copy", "-P",
+        "--retries", "10",
+        "--low-level-retries", "20",
+        "--drive-chunk-size", "32M",
+        mkv_final, destino_final
+    ])
+
+    fcntl.flock(lock_file, fcntl.LOCK_UN)
+    lock_file.close()
+
+    if res_up.returncode == 0:
+        print("\n🎉 ¡Subida a Google Drive completada con éxito!")
+        registrar_en_catalogo(col_pelicula_doc, sub_ruta_catalogo)
+    else:
+        print("\n❌ Hubo un problema durante la subida con rclone.")
+
+if __name__ == "__main__":
+    main()

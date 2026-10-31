@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+import os
+import sys
+import json
+import fcntl
+import subprocess
+import time
+
+def obtener_info_mkv(video_path):
+    res = subprocess.run(["mkvmerge", "-J", video_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if res.returncode != 0:
+        return []
+    try:
+        return json.loads(res.stdout).get("tracks", [])
+    except Exception:
+        return []
+
+def main():
+    archivos = sorted(os.listdir("."))
+    videos = [f for f in archivos if f.lower().endswith((".mkv", ".mp4")) and not f.startswith("temp_")]
+
+    if not videos:
+        print("❌ No se encontraron capítulos (.mkv o .mp4) en esta carpeta.")
+        sys.exit(1)
+
+    print(f"🎬 Se encontraron {len(videos)} capítulos. Procesando subtítulos en bloque...")
+
+    for video in videos:
+        mkv_final = os.path.splitext(video)[0] + ".mkv"
+        temp_mkv = "temp_mux_" + mkv_final
+        srt_externo = os.path.splitext(video)[0] + ".srt"
+
+        # CASO A: Tiene su propio .srt externo con el mismo nombre
+        if os.path.exists(srt_externo):
+            print(f"⚙️  [{video}] Uniendo .srt externo...")
+            cmd = [
+                "mkvmerge", "-o", temp_mkv,
+                "-S", video,
+                "--language", "0:spa",
+                "--track-name", "0:Español",
+                "--default-track-flag", "0:yes",
+                srt_externo
+            ]
+            if subprocess.run(cmd, stdout=subprocess.DEVNULL).returncode in [0, 1]:
+                os.remove(video)
+                os.rename(temp_mkv, mkv_final)
+                os.remove(srt_externo)
+        
+        # CASO B: Subtítulos internos (como "The Studio")
+        else:
+            tracks = obtener_info_mkv(video)
+            sub_tracks = [t for t in tracks if t.get("type") == "subtitles"]
+            id_esp = None
+
+            for t in sub_tracks:
+                props = t.get("properties", {})
+                lang = (props.get("language_ietf") or props.get("language", "")).lower()
+                name = props.get("track_name", "").lower()
+                
+                if "es" in lang or "spa" in lang or "esp" in name:
+                    id_esp = str(t["id"])
+                    break
+            
+            if id_esp:
+                print(f"🧹 [{video}] Limpiando otros idiomas. Dejando subtítulo español (ID: {id_esp})...")
+                cmd = [
+                    "mkvmerge", "-o", temp_mkv,
+                    "-s", id_esp,
+                    "--language", f"{id_esp}:spa",
+                    "--track-name", f"{id_esp}:Español",
+                    "--default-track-flag", f"{id_esp}:yes",
+                    video
+                ]
+                if subprocess.run(cmd, stdout=subprocess.DEVNULL).returncode in [0, 1]:
+                    os.remove(video)
+                    os.rename(temp_mkv, mkv_final)
+            else:
+                print(f"⚠️  [{video}] No se detectó subtítulo en español interno. Queda como está.")
+
+    print("\n✅ ¡Todos los capítulos limpios y listos para subir!")
+
+    # SELECCIÓN DE CARPETA
+    nombre_serie = input("\n📺 Ingresá el nombre de la Serie (ej: The Studio): ").strip()
+    if not nombre_serie:
+        sys.exit("Operación cancelada.")
+        
+    temporada = input(f"📁 Ingresá la temporada (ej: Temporada 1): ").strip() or "Temporada 1"
+    
+    destino_final = f"drive:PELICULAS/Series/{nombre_serie}/{temporada}"
+    
+    # SISTEMA DE COLA AUTOMÁTICA
+    lock_file = open("/tmp/subirpeli_queue.lock", "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print(f"\n⏳ Hay otra subida en curso. La temporada quedó en espera...")
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+
+    print(f"\n🚀 Subiendo carpeta completa a ➔ {destino_final} ...\n")
+    res_up = subprocess.run([
+        "rclone", "copy", "-P",
+        "--retries", "10",
+        "--low-level-retries", "20",
+        "--drive-chunk-size", "32M",
+        ".", destino_final,
+        "--exclude", "*.torrent"
+    ])
+
+    fcntl.flock(lock_file, fcntl.LOCK_UN)
+    lock_file.close()
+
+    if res_up.returncode == 0:
+        print(f"\n🎉 ¡Temporada de '{nombre_serie}' subida con éxito!")
+    else:
+        print("\n❌ Hubo un problema con la conexión durante la subida.")
+
+if __name__ == "__main__":
+    main()
