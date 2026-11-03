@@ -12,17 +12,23 @@ import urllib.request
 WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbwHYU9A7PUWwFPUmjeJhCP_1Ro8q0_FnwXB9XYEoRY_rbb3534hzP6epAGY3iDrI6CZ/exec"
 
 CATEGORIAS = [
-    "Acción y Thriller",
+    "Acción",
     "Animación",
-    "ARGENTINA",
+    "Argentina",
     "Ciencia Ficción",
     "Clásicos",
     "Comedia",
+    "Crime y Suspenso",
     "Directores",
     "Documentales",
     "Drama",
+    "Drama - Deportes",
+    "Drama - Hechos Reales",
+    "Drama - Romance",
     "Sagas",
-    "Terror y Suspenso"
+    "Terror ",
+    "Thriller",
+    "znuevas"
 ]
 
 def limpiar_titulo_sugerido(nombre):
@@ -88,7 +94,7 @@ def registrar_en_catalogo(col_pelicula, col_carpeta):
         print(f"   {col_pelicula}   |   {col_carpeta}")
 
 def hay_rclone_activo():
-    res = subprocess.run(["pgrep", "-f", "rclone (copy|move)"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    res = subprocess.run(["pgrep", "-f", "rclone copy"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return res.returncode == 0
 
 def main():
@@ -195,18 +201,18 @@ def main():
         minutos = int(min_manual) if min_manual.isdigit() else 120
 
     # SELECCIÓN DE CARPETA DE DESTINO EN GOOGLE DRIVE
-    print("\n📂 Elegí a cuál de las 11 carpetas de PELICULAS querés subirla:")
+    print(f"\n📂 Elegí a cuál de las {len(CATEGORIAS)} carpetas de PELICULAS querés subirla:")
     for i, cat in enumerate(CATEGORIAS, 1):
-        print(f"  {i:2d}. {cat}")
+        print(f"  {i:2d}. {cat.strip()}")
 
-    op = int(input("\nNúmero de categoría (1-11): ").strip())
+    op = int(input(f"\nNúmero de categoría (1-{len(CATEGORIAS)}): ").strip())
     categoria_elegida = CATEGORIAS[op - 1]
     ruta_remota_base = f"drive:PELICULAS/{categoria_elegida}"
 
-    if categoria_elegida in ["Directores", "Sagas", "ARGENTINA"]:
-        print(f"\n🔍 Subcarpetas actuales dentro de '{categoria_elegida}':")
+    if categoria_elegida in ["Directores", "Sagas", "Argentina", "Ciencia Ficción"]:
+        print(f"\n🔍 Subcarpetas actuales dentro de '{categoria_elegida.strip()}':")
         subprocess.run(["rclone", "lsf", "--dirs-only", ruta_remota_base])
-        sub = input(f"Escribí el nombre de la subcarpeta (o Enter si va suelta en {categoria_elegida}): ").strip().rstrip("/")
+        sub = input(f"Escribí el nombre de la subcarpeta (o Enter si va suelta en {categoria_elegida.strip()}): ").strip().rstrip("/")
         if sub:
             ruta_remota_base = f"{ruta_remota_base}/{sub}"
 
@@ -219,7 +225,7 @@ def main():
     titulo_esp = input(f"🇦🇷 Título en español para el catálogo [{base_sin_anio}]: ").strip() or base_sin_anio
 
     destino_final = f"{ruta_remota_base}/{nombre_carpeta_peli}"
-    sub_ruta_catalogo = ruta_remota_base.replace("drive:PELICULAS/", "").replace("/", " › ")
+    sub_ruta_catalogo = ruta_remota_base.replace("drive:PELICULAS/", "").replace("/", " › ").strip()
     col_pelicula_doc = f"{titulo_catalogo_ing} / {titulo_esp} [{minutos}m]"
 
     # SISTEMA DE COLA AUTOMÁTICA
@@ -238,9 +244,11 @@ def main():
     print(f"\n🚀 Turno asignado. Subiendo '{mkv_final}' a ➔ {destino_final} ...\n")
     res_up = subprocess.run([
         "rclone", "copy", "-P",
-        "--retries", "10",
-        "--low-level-retries", "20",
-        "--drive-chunk-size", "32M",
+        "--retries", "3",
+        "--low-level-retries", "10",
+        "--timeout", "10m",
+        "--contimeout", "1m",
+        "--drive-chunk-size", "64M",
         mkv_final, destino_final
     ])
 
